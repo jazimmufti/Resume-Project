@@ -3,14 +3,16 @@ import json
 from dotenv import load_dotenv
 from google import genai
 from datetime import datetime
+import streamlit as st
 
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    api_key = os.getenv("GEMINI_API_KEY")
 
-client = genai.Client(
-    api_key=api_key
-)
+client = genai.Client(api_key=api_key)
 
 
 # =========================================================
