@@ -6,3 +6,4 @@ python-dotenv
 phonenumbers
 streamlit
 openpyxl
+pytesseract
