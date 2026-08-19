@@ -1,0 +1,8 @@
+pymupdf
+python-docx
+pandas
+google-genai
+python-dotenv
+phonenumbers
+streamlit
+openpyxl
