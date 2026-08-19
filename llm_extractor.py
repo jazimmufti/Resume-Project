@@ -7,10 +7,11 @@ import streamlit as st
 
 load_dotenv()
 
-try:
-    api_key = st.secrets["GEMINI_API_KEY"]
-except Exception:
-    api_key = os.getenv("GEMINI_API_KEY")
+# Get API key from Streamlit Cloud or local .env
+api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
+
+if not api_key:
+    raise ValueError("GEMINI_API_KEY is not configured.")
 
 client = genai.Client(api_key=api_key)
 
