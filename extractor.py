@@ -1,6 +1,7 @@
 import pymupdf
 import re
 import phonenumbers
+import os
 import pytesseract
 
 from PIL import Image
