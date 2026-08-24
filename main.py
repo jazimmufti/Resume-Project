@@ -71,8 +71,9 @@ for filename in os.listdir(RESUME_FOLDER):
         # 5. Combine everything
         # --------------------------------
 
-        candidate["email"] = email
         candidate["phone"] = phone
+        candidate["email"] = email
+
         candidate["resume_file"] = filename
 
         results.append(candidate)

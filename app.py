@@ -293,8 +293,8 @@ if st.button("🚀 Process Resumes"):
 
             columns = [
                 "full_name",
-                "email",
                 "phone",
+                "email",
                 "location",
                 "highest_education",
                 "total_experience",
