@@ -165,7 +165,7 @@ if st.button("🚀 Process Resumes"):
 
 
                 # -----------------------------------------
-                # Extract candidate information using Gemini
+                # Extract candidate information using Mistral AI
                 # -----------------------------------------
 
                 candidate = extract_candidate_details(
@@ -206,7 +206,7 @@ if st.button("🚀 Process Resumes"):
 
 
                 # -----------------------------------------
-                # Remove intermediate Gemini field
+                # Remove intermediate LLM field
                 # -----------------------------------------
 
                 candidate.pop(

@@ -1,26 +1,29 @@
 import os
 import json
 from dotenv import load_dotenv
-from google import genai
+try:
+    from mistralai.client import Mistral
+except ImportError:
+    from mistralai import Mistral
 from datetime import datetime
 import streamlit as st
 
 load_dotenv()
 
 # Get API key from local .env first
-api_key = os.getenv("GEMINI_API_KEY")
+api_key = os.getenv("MISTRAL_API_KEY")
 
 # If running on Streamlit Cloud, try Streamlit secrets
 if not api_key:
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
+        api_key = st.secrets["MISTRAL_API_KEY"]
     except (FileNotFoundError, KeyError):
         pass
 
 if not api_key:
-    raise ValueError("GEMINI_API_KEY is not configured.")
+    raise ValueError("MISTRAL_API_KEY is not configured.")
 
-client = genai.Client(api_key=api_key)
+client = Mistral(api_key=api_key)
 
 
 
@@ -446,16 +449,21 @@ RESUME:
 {resume_text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json"
+    response = client.chat.complete(
+        model="mistral-large-latest",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        response_format={
+            "type": "json_object"
         }
     )
 
     candidate = json.loads(
-        response.text
+        response.choices[0].message.content
     )
 
     # -----------------------------------------------------
