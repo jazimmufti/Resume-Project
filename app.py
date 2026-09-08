@@ -7,13 +7,15 @@ from io import BytesIO
 from extractor import (
     extract_text,
     extract_email,
-    extract_phone
+    extract_phone,
+    extract_name
 )
 
 from llm_extractor import (
     extract_candidate_details,
     calculate_experience,
-    calculate_relevant_experience
+    calculate_relevant_experience,
+    _redact
 )
 
 
@@ -169,8 +171,15 @@ if st.button("🚀 Process Resumes"):
                 # -----------------------------------------
 
                 candidate = extract_candidate_details(
-                    resume_text
+                    resume_text,
+                    filename=uploaded_file.name
                 )
+
+                # Fallback to python extracted name if LLM extraction returned null
+                if not candidate.get("full_name"):
+                    python_name = extract_name(resume_text)
+                    if python_name:
+                        candidate["full_name"] = python_name
 
 
                 # -----------------------------------------
@@ -241,7 +250,7 @@ if st.button("🚀 Process Resumes"):
 
                 st.error(
                     f"Error processing "
-                    f"{uploaded_file.name}: {e}"
+                    f"{uploaded_file.name}: {_redact(str(e))}"
                 )
 
 

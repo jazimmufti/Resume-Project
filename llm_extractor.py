@@ -1,9 +1,23 @@
 import os
 import json
+import time
+import re
+import threading
+import logging
 from dotenv import load_dotenv
 from google import genai
 from datetime import datetime
 import streamlit as st
+
+# Configure logger
+logger = logging.getLogger("ResumeScreener.Gemini")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+    )
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 load_dotenv()
 
@@ -21,6 +35,122 @@ if not api_key:
     raise ValueError("GEMINI_API_KEY is not configured.")
 
 client = genai.Client(api_key=api_key)
+
+# Concurrency and Rate Limiting Controls
+_gemini_lock = threading.Lock()
+_last_request_time = 0.0
+_MIN_REQUEST_INTERVAL = 1.0  # 1.0s sequential pacing between requests
+
+# Exponential backoff schedule: 5s, 10s, 20s, 40s, 60s
+BACKOFF_DELAYS = [5, 10, 20, 40, 60]
+
+# Primary and configured fallback models
+PRIMARY_MODEL = "gemini-3.6-flash"
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
+
+
+def _redact(msg: object) -> str:
+    """Sanitize message to ensure API keys are never exposed in logs or UI."""
+    if not msg:
+        return ""
+    text = str(msg)
+    for k in (api_key, os.getenv("GEMINI_API_KEY"), os.getenv("MISTRAL_API_KEY")):
+        if k and k in text:
+            text = text.replace(k, "[REDACTED_API_KEY]")
+    text = re.sub(r'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]', text)
+    text = re.sub(r'AQ\.[0-9A-Za-z-_]{40,}', '[REDACTED_API_KEY]', text)
+    return text
+
+
+def is_retryable_error(error: Exception) -> bool:
+    """
+    Check whether an error is retryable.
+    Retryable: 429 RESOURCE_EXHAUSTED / rate limit, 503 UNAVAILABLE / high demand.
+    Non-retryable: 400 invalid argument, 401/403 authentication/permission, 404 not found.
+    """
+    code = getattr(error, "code", None)
+    status = str(getattr(error, "status", "") or "").upper()
+    msg = str(error).upper()
+
+    # Explicit non-retryable errors
+    if code in (400, 401, 403, 404):
+        return False
+    if any(term in status for term in ["INVALID_ARGUMENT", "PERMISSION_DENIED", "UNAUTHENTICATED", "NOT_FOUND"]):
+        return False
+
+    # Retryable errors
+    if code in (429, 503):
+        return True
+    if "RESOURCE_EXHAUSTED" in status or "RESOURCE_EXHAUSTED" in msg:
+        return True
+    if "UNAVAILABLE" in status or "UNAVAILABLE" in msg:
+        return True
+    if "429" in msg or "503" in msg:
+        return True
+
+    return False
+
+
+def get_retry_delay(error: Exception, default_delay: float) -> float:
+    """
+    Determine wait time, respecting any Retry-After header or RetryInfo
+    returned by the API when available.
+    """
+    # 1. Check HTTP response headers for Retry-After
+    response = getattr(error, "response", None)
+    if response is not None and hasattr(response, "headers"):
+        headers = response.headers
+        ra = headers.get("retry-after") or headers.get("Retry-After")
+        if ra:
+            try:
+                val = float(ra)
+                if val > 0:
+                    return max(val, default_delay)
+            except (ValueError, TypeError):
+                pass
+
+    # 2. Check error.details for Google RPC RetryInfo
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        err_body = details.get("error", details)
+        if isinstance(err_body, dict):
+            detail_items = err_body.get("details", [])
+            if isinstance(detail_items, list):
+                for item in detail_items:
+                    if isinstance(item, dict) and "retryDelay" in item:
+                        rd = str(item["retryDelay"])
+                        if rd.endswith("s"):
+                            rd = rd[:-1]
+                        try:
+                            val = float(rd)
+                            if val > 0:
+                                return max(val, default_delay)
+                        except ValueError:
+                            pass
+
+    # 3. Check error text for regex match (e.g. 'retry after 12s')
+    msg = str(error).lower()
+    match = re.search(r"retry\s+after\s+(\d+(?:\.\d+)?)\s*s", msg)
+    if match:
+        try:
+            return max(float(match.group(1)), default_delay)
+        except ValueError:
+            pass
+
+    return default_delay
+
+
+def get_error_type(error: Exception) -> str:
+    """Format clear, readable error string with code and status."""
+    code = getattr(error, "code", None)
+    status = getattr(error, "status", None)
+    type_name = type(error).__name__
+    parts = [type_name]
+    if code:
+        parts.append(f"HTTP {code}")
+    if status:
+        parts.append(str(status))
+    return " / ".join(parts)
 
 
 
@@ -165,7 +295,7 @@ def normalize_education(education):
 # CANDIDATE EXTRACTION
 # =========================================================
 
-def extract_candidate_details(resume_text):
+def extract_candidate_details(resume_text, filename="Unknown"):
 
     current_year = datetime.now().year
 
@@ -446,31 +576,95 @@ RESUME:
 {resume_text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json"
-        }
+    global _last_request_time
+
+    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
+    max_retries = len(BACKOFF_DELAYS)
+
+    for model_idx, model_name in enumerate(models_to_try):
+        is_fallback = (model_idx > 0)
+        if is_fallback:
+            logger.warning(
+                f"[Gemini Fallback] File: {filename} | Primary model {PRIMARY_MODEL} exhausted. "
+                f"Attempting fallback model: {model_name}"
+            )
+
+        for attempt in range(1, max_retries + 2):  # 1 initial attempt + 5 retries
+            # Concurrency control and pacing
+            with _gemini_lock:
+                now = time.time()
+                elapsed = now - _last_request_time
+                if elapsed < _MIN_REQUEST_INTERVAL:
+                    time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+                _last_request_time = time.time()
+
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "response_mime_type": "application/json"
+                    }
+                )
+
+                candidate = json.loads(
+                    response.text
+                )
+
+                # Convert structured education into final string
+                education = candidate.get(
+                    "highest_education"
+                )
+
+                candidate["highest_education"] = normalize_education(
+                    education
+                )
+
+                return candidate
+
+            except Exception as e:
+                error_type_str = get_error_type(e)
+                sanitized_err = _redact(e)
+
+                if not is_retryable_error(e):
+                    logger.error(
+                        f"[Gemini Non-Retryable Error] File: {filename} | Model: {model_name} | "
+                        f"Error: {error_type_str} | Details: {sanitized_err}"
+                    )
+                    return {
+                        "full_name": None,
+                        "location": None,
+                        "highest_education": None,
+                        "experience_periods": []
+                    }
+
+                if attempt <= max_retries:
+                    base_delay = BACKOFF_DELAYS[attempt - 1]
+                    delay = get_retry_delay(e, base_delay)
+                    logger.warning(
+                        f"[Gemini Retry] File: {filename} | Model: {model_name} | "
+                        f"Attempt {attempt}/{max_retries} failed ({error_type_str}). "
+                        f"Retrying in {delay:.1f}s... | Details: {sanitized_err}"
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.warning(
+                        f"[Gemini Retries Exhausted] File: {filename} | Model: {model_name} | "
+                        f"All {max_retries} retries exhausted for this model."
+                    )
+
+    # If all models and retries exhausted, gracefully fail without crashing
+    logger.error(
+        f"[Gemini Final Failure] File: {filename} | All Gemini models and retries exhausted. "
+        f"Gracefully continuing with partial extraction."
     )
 
-    candidate = json.loads(
-        response.text
-    )
-
-    # -----------------------------------------------------
-    # Convert structured education into final string
-    # -----------------------------------------------------
-
-    education = candidate.get(
-        "highest_education"
-    )
-
-    candidate["highest_education"] = normalize_education(
-        education
-    )
-
-    return candidate
+    return {
+        "full_name": None,
+        "location": None,
+        "highest_education": None,
+        "experience_periods": []
+    }
 
 
 # =========================================================

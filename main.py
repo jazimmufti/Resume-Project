@@ -7,7 +7,10 @@ from extractor import (
     extract_phone
 )
 
-from llm_extractor import extract_candidate_details
+from llm_extractor import (
+    extract_candidate_details,
+    _redact
+)
 
 
 RESUME_FOLDER = "resumes"
@@ -63,8 +66,14 @@ for filename in os.listdir(RESUME_FOLDER):
         # --------------------------------
 
         candidate = extract_candidate_details(
-            resume_text
+            resume_text,
+            filename=filename
         )
+
+        if not candidate.get("full_name"):
+            python_name = extract_name(resume_text)
+            if python_name:
+                candidate["full_name"] = python_name
 
 
         # --------------------------------
@@ -85,7 +94,7 @@ for filename in os.listdir(RESUME_FOLDER):
     except Exception as e:
 
         print(
-            f"Error processing {filename}: {e}"
+            f"Error processing {filename}: {_redact(str(e))}"
         )
 
 

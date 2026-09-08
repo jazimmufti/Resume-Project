@@ -63,7 +63,8 @@ python_name = extract_name(
 # =========================================================
 
 candidate = extract_candidate_details(
-    resume_text
+    resume_text,
+    filename=file_path
 )
 
 
