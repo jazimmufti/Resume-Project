@@ -165,7 +165,7 @@ if st.button("🚀 Process Resumes"):
 
 
                 # -----------------------------------------
-                # Extract candidate information using Mistral AI
+                # Extract candidate information using Gemini
                 # -----------------------------------------
 
                 candidate = extract_candidate_details(

@@ -1,7 +1,7 @@
 pymupdf
 python-docx
 pandas
-mistralai
+google-genai
 python-dotenv
 phonenumbers
 streamlit

@@ -59,7 +59,7 @@ python_name = extract_name(
 
 
 # =========================================================
-# MISTRAL EXTRACTION
+# GEMINI EXTRACTION
 # =========================================================
 
 candidate = extract_candidate_details(

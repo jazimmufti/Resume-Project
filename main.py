@@ -59,7 +59,7 @@ for filename in os.listdir(RESUME_FOLDER):
 
 
         # --------------------------------
-        # 4. Mistral extracts difficult fields
+        # 4. Gemini extracts difficult fields
         # --------------------------------
 
         candidate = extract_candidate_details(
