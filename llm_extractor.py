@@ -450,7 +450,7 @@ RESUME:
 """
 
     response = client.chat.complete(
-        model="mistral-large-latest",
+        model="mistral-small-latest",
         messages=[
             {
                 "role": "user",
