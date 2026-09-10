@@ -167,7 +167,7 @@ if st.button("🚀 Process Resumes"):
 
 
                 # -----------------------------------------
-                # Extract candidate information using Gemini
+                # Extract candidate information using LLaMA
                 # -----------------------------------------
 
                 candidate = extract_candidate_details(

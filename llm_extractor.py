@@ -5,12 +5,12 @@ import re
 import threading
 import logging
 from dotenv import load_dotenv
-from google import genai
+from groq import Groq
 from datetime import datetime
 import streamlit as st
 
 # Configure logger
-logger = logging.getLogger("ResumeScreener.Gemini")
+logger = logging.getLogger("ResumeScreener.LLaMA")
 if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(
@@ -22,31 +22,47 @@ logger.setLevel(logging.INFO)
 load_dotenv()
 
 # Get API key from local .env first
-api_key = os.getenv("GEMINI_API_KEY")
+api_key = os.getenv("GROQ_API_KEY")
 
 # If running on Streamlit Cloud, try Streamlit secrets
 if not api_key:
     try:
-        api_key = st.secrets["GEMINI_API_KEY"]
+        api_key = st.secrets["GROQ_API_KEY"]
     except (FileNotFoundError, KeyError):
         pass
 
-if not api_key:
-    raise ValueError("GEMINI_API_KEY is not configured.")
 
-client = genai.Client(api_key=api_key)
+def get_groq_client() -> Groq:
+    """Lazily load and return the Groq client, ensuring key configuration."""
+    global api_key
+    if not api_key:
+        load_dotenv()
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            try:
+                api_key = st.secrets["GROQ_API_KEY"]
+            except (FileNotFoundError, KeyError):
+                pass
+
+    if not api_key:
+        raise ValueError(
+            "GROQ_API_KEY is not configured. Please set GROQ_API_KEY in your .env file or Streamlit secrets."
+        )
+
+    return Groq(api_key=api_key)
+
 
 # Concurrency and Rate Limiting Controls
-_gemini_lock = threading.Lock()
+_llama_lock = threading.Lock()
 _last_request_time = 0.0
-_MIN_REQUEST_INTERVAL = 1.0  # 1.0s sequential pacing between requests
+_MIN_REQUEST_INTERVAL = 0.2  # Sequential pacing between requests
 
-# Exponential backoff schedule: 5s, 10s, 20s, 40s, 60s
-BACKOFF_DELAYS = [5, 10, 20, 40, 60]
+# Exponential backoff schedule: 2s, 5s, 10s, 20s, 30s
+BACKOFF_DELAYS = [2, 5, 10, 20, 30]
 
-# Primary and configured fallback models
-PRIMARY_MODEL = "gemini-3.6-flash"
-FALLBACK_MODEL = "gemini-3.5-flash-lite"
+# Primary fast model and fallback model
+PRIMARY_MODEL = "groq/compound-mini"
+FALLBACK_MODEL = "openai/gpt-oss-20b"
 
 
 def _redact(msg: object) -> str:
@@ -54,21 +70,20 @@ def _redact(msg: object) -> str:
     if not msg:
         return ""
     text = str(msg)
-    for k in (api_key, os.getenv("GEMINI_API_KEY"), os.getenv("MISTRAL_API_KEY")):
+    for k in (api_key, os.getenv("GROQ_API_KEY")):
         if k and k in text:
             text = text.replace(k, "[REDACTED_API_KEY]")
-    text = re.sub(r'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]', text)
-    text = re.sub(r'AQ\.[0-9A-Za-z-_]{40,}', '[REDACTED_API_KEY]', text)
+    text = re.sub(r'gsk_[0-9A-Za-z]{20,}', '[REDACTED_API_KEY]', text)
     return text
 
 
 def is_retryable_error(error: Exception) -> bool:
     """
     Check whether an error is retryable.
-    Retryable: 429 RESOURCE_EXHAUSTED / rate limit, 503 UNAVAILABLE / high demand.
+    Retryable: 429 rate limit, 500/502/503/504 server errors, network connection drops.
     Non-retryable: 400 invalid argument, 401/403 authentication/permission, 404 not found.
     """
-    code = getattr(error, "code", None)
+    code = getattr(error, "status_code", None) or getattr(error, "code", None)
     status = str(getattr(error, "status", "") or "").upper()
     msg = str(error).upper()
 
@@ -77,15 +92,21 @@ def is_retryable_error(error: Exception) -> bool:
         return False
     if any(term in status for term in ["INVALID_ARGUMENT", "PERMISSION_DENIED", "UNAUTHENTICATED", "NOT_FOUND"]):
         return False
+    if any(term in msg for term in ["INVALID_API_KEY", "UNAUTHORIZED", "AUTHENTICATION_FAILED", "MODEL_NOT_FOUND"]):
+        return False
 
     # Retryable errors
-    if code in (429, 503):
+    if code in (429, 500, 502, 503, 504):
         return True
-    if "RESOURCE_EXHAUSTED" in status or "RESOURCE_EXHAUSTED" in msg:
+    if "RESOURCE_EXHAUSTED" in status or "RATE_LIMIT" in msg or "RATELIMIT" in msg:
         return True
-    if "UNAVAILABLE" in status or "UNAVAILABLE" in msg:
+    if "UNAVAILABLE" in status or "UNAVAILABLE" in msg or "OVERLOADED" in msg:
         return True
     if "429" in msg or "503" in msg:
+        return True
+
+    err_name = type(error).__name__
+    if any(term in err_name for term in ["Connection", "Timeout", "RateLimit"]):
         return True
 
     return False
@@ -93,7 +114,7 @@ def is_retryable_error(error: Exception) -> bool:
 
 def get_retry_delay(error: Exception, default_delay: float) -> float:
     """
-    Determine wait time, respecting any Retry-After header or RetryInfo
+    Determine wait time, respecting any Retry-After header or message
     returned by the API when available.
     """
     # 1. Check HTTP response headers for Retry-After
@@ -109,31 +130,14 @@ def get_retry_delay(error: Exception, default_delay: float) -> float:
             except (ValueError, TypeError):
                 pass
 
-    # 2. Check error.details for Google RPC RetryInfo
-    details = getattr(error, "details", None)
-    if isinstance(details, dict):
-        err_body = details.get("error", details)
-        if isinstance(err_body, dict):
-            detail_items = err_body.get("details", [])
-            if isinstance(detail_items, list):
-                for item in detail_items:
-                    if isinstance(item, dict) and "retryDelay" in item:
-                        rd = str(item["retryDelay"])
-                        if rd.endswith("s"):
-                            rd = rd[:-1]
-                        try:
-                            val = float(rd)
-                            if val > 0:
-                                return max(val, default_delay)
-                        except ValueError:
-                            pass
-
-    # 3. Check error text for regex match (e.g. 'retry after 12s')
+    # 2. Check error text for regex match (e.g. 'try again in 2.5s' or 'retry after 12s')
     msg = str(error).lower()
-    match = re.search(r"retry\s+after\s+(\d+(?:\.\d+)?)\s*s", msg)
+    match = re.search(r"(?:retry\s+after|try\s+again\s+in)\s*(\d+(?:\.\d+)?)\s*s?", msg)
     if match:
         try:
-            return max(float(match.group(1)), default_delay)
+            val = float(match.group(1))
+            if val > 0:
+                return max(val, default_delay)
         except ValueError:
             pass
 
@@ -142,7 +146,7 @@ def get_retry_delay(error: Exception, default_delay: float) -> float:
 
 def get_error_type(error: Exception) -> str:
     """Format clear, readable error string with code and status."""
-    code = getattr(error, "code", None)
+    code = getattr(error, "status_code", None) or getattr(error, "code", None)
     status = getattr(error, "status", None)
     type_name = type(error).__name__
     parts = [type_name]
@@ -581,17 +585,23 @@ RESUME:
     models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL]
     max_retries = len(BACKOFF_DELAYS)
 
+    try:
+        client = get_groq_client()
+    except Exception as e:
+        logger.error(f"[LLaMA Configuration Error] File: {filename} | {_redact(str(e))}")
+        raise e
+
     for model_idx, model_name in enumerate(models_to_try):
         is_fallback = (model_idx > 0)
         if is_fallback:
             logger.warning(
-                f"[Gemini Fallback] File: {filename} | Primary model {PRIMARY_MODEL} exhausted. "
+                f"[LLaMA Fallback] File: {filename} | Primary model {PRIMARY_MODEL} exhausted. "
                 f"Attempting fallback model: {model_name}"
             )
 
-        for attempt in range(1, max_retries + 2):  # 1 initial attempt + 5 retries
+        for attempt in range(1, max_retries + 2):  # 1 initial attempt + retries
             # Concurrency control and pacing
-            with _gemini_lock:
+            with _llama_lock:
                 now = time.time()
                 elapsed = now - _last_request_time
                 if elapsed < _MIN_REQUEST_INTERVAL:
@@ -599,17 +609,26 @@ RESUME:
                 _last_request_time = time.time()
 
             try:
-                response = client.models.generate_content(
+                response = client.chat.completions.create(
                     model=model_name,
-                    contents=prompt,
-                    config={
-                        "response_mime_type": "application/json"
-                    }
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert resume parsing assistant that extracts data and outputs strictly valid JSON."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    response_format={
+                        "type": "json_object"
+                    },
+                    temperature=0.1
                 )
 
-                candidate = json.loads(
-                    response.text
-                )
+                content = response.choices[0].message.content
+                candidate = json.loads(content)
 
                 # Convert structured education into final string
                 education = candidate.get(
@@ -628,7 +647,7 @@ RESUME:
 
                 if not is_retryable_error(e):
                     logger.error(
-                        f"[Gemini Non-Retryable Error] File: {filename} | Model: {model_name} | "
+                        f"[LLaMA Non-Retryable Error] File: {filename} | Model: {model_name} | "
                         f"Error: {error_type_str} | Details: {sanitized_err}"
                     )
                     return {
@@ -642,20 +661,20 @@ RESUME:
                     base_delay = BACKOFF_DELAYS[attempt - 1]
                     delay = get_retry_delay(e, base_delay)
                     logger.warning(
-                        f"[Gemini Retry] File: {filename} | Model: {model_name} | "
+                        f"[LLaMA Retry] File: {filename} | Model: {model_name} | "
                         f"Attempt {attempt}/{max_retries} failed ({error_type_str}). "
                         f"Retrying in {delay:.1f}s... | Details: {sanitized_err}"
                     )
                     time.sleep(delay)
                 else:
                     logger.warning(
-                        f"[Gemini Retries Exhausted] File: {filename} | Model: {model_name} | "
+                        f"[LLaMA Retries Exhausted] File: {filename} | Model: {model_name} | "
                         f"All {max_retries} retries exhausted for this model."
                     )
 
     # If all models and retries exhausted, gracefully fail without crashing
     logger.error(
-        f"[Gemini Final Failure] File: {filename} | All Gemini models and retries exhausted. "
+        f"[LLaMA Final Failure] File: {filename} | All LLaMA models and retries exhausted. "
         f"Gracefully continuing with partial extraction."
     )
 

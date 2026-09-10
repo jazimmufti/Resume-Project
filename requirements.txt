@@ -1,7 +1,7 @@
 pymupdf
 python-docx
 pandas
-google-genai
+groq
 python-dotenv
 phonenumbers
 streamlit
