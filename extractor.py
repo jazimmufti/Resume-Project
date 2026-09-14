@@ -1,3 +1,4 @@
+import io
 import pymupdf
 import re
 import phonenumbers
@@ -117,107 +118,83 @@ def extract_name(text):
 # PDF EXTRACTION
 # =========================================================
 
-def extract_pdf(file_path):
+def extract_pdf(source):
+    """
+    Extract text and mailto links from a PDF file path or byte stream.
+    Only falls back to OCR if the page has sparse or no native text
+    (e.g., scanned images), speeding up processing by 10x to 100x.
+    """
+    text_parts = []
 
-    text = ""
+    if isinstance(source, (bytes, bytearray)):
+        document = pymupdf.open(stream=source, filetype="pdf")
+    elif hasattr(source, "getvalue"):
+        document = pymupdf.open(stream=source.getvalue(), filetype="pdf")
+    elif hasattr(source, "read"):
+        document = pymupdf.open(stream=source.read(), filetype="pdf")
+    else:
+        document = pymupdf.open(source)
 
-    document = pymupdf.open(file_path)
+    try:
+        for page in document:
+            # 1. Fast native PDF text extraction
+            page_text = page.get_text()
 
-    for page_number, page in enumerate(document):
+            # 2. Extract PDF email links (mailto:)
+            links = page.get_links()
+            link_emails = []
+            for link in links:
+                uri = link.get("uri", "")
+                if uri.lower().startswith("mailto:"):
+                    email = uri[7:].split("?")[0]
+                    link_emails.append(email)
 
-        # -----------------------------------------
-        # Normal PDF text
-        # -----------------------------------------
+            if link_emails:
+                page_text += "\n" + "\n".join(link_emails)
 
-        page_text = page.get_text()
+            # 3. Fallback to OCR ONLY if native text is sparse or missing (e.g. scanned resume)
+            if len(page_text.strip()) < 50:
+                try:
+                    pix = page.get_pixmap(
+                        matrix=pymupdf.Matrix(2, 2),
+                        alpha=False
+                    )
+                    img = Image.frombytes(
+                        "RGB",
+                        [pix.width, pix.height],
+                        pix.samples
+                    )
+                    ocr_text = pytesseract.image_to_string(
+                        img,
+                        config="--psm 6"
+                    )
+                    if ocr_text:
+                        page_text += "\n" + ocr_text
+                except Exception:
+                    pass
 
-        text += page_text + "\n"
+            text_parts.append(page_text)
+    finally:
+        document.close()
 
-
-        # -----------------------------------------
-        # PDF email links
-        # -----------------------------------------
-
-        links = page.get_links()
-
-        for link in links:
-
-            uri = link.get("uri", "")
-
-            if uri.lower().startswith("mailto:"):
-
-                email = uri[7:].split("?")[0]
-
-                text += email + "\n"
-
-
-        # -----------------------------------------
-        # OCR
-        # -----------------------------------------
-
-        pix = page.get_pixmap(
-            matrix=pymupdf.Matrix(3, 3),
-            alpha=False
-        )
-
-        img = Image.frombytes(
-            "RGB",
-            [pix.width, pix.height],
-            pix.samples
-        )
-
-
-        # OCR pass 1
-        ocr_text = pytesseract.image_to_string(
-            img,
-            config="--psm 6"
-        )
-
-        text += "\n" + ocr_text
-
-
-        # OCR pass 2
-        ocr_text = pytesseract.image_to_string(
-            img,
-            config="--psm 11"
-        )
-
-        text += "\n" + ocr_text
-
-
-        # OCR pass 3
-        ocr_text = pytesseract.image_to_string(
-            img,
-            config=(
-                "--psm 11 "
-                "-c tessedit_char_whitelist="
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                "abcdefghijklmnopqrstuvwxyz"
-                "0123456789"
-                "@._+-"
-            )
-        )
-
-        text += "\n" + ocr_text
-
-
-    document.close()
-
-    return text
+    return "\n".join(text_parts)
 
 
 # =========================================================
 # DOCX
 # =========================================================
 
-def extract_docx(file_path):
+def extract_docx(source):
+    """Extract text from a DOCX file path or byte stream."""
+    if isinstance(source, (bytes, bytearray)):
+        source = io.BytesIO(source)
+    elif hasattr(source, "getvalue"):
+        source = io.BytesIO(source.getvalue())
 
-    document = Document(file_path)
+    document = Document(source)
 
     text = ""
-
     for paragraph in document.paragraphs:
-
         text += paragraph.text + "\n"
 
     return text
@@ -227,15 +204,24 @@ def extract_docx(file_path):
 # GENERAL TEXT EXTRACTION
 # =========================================================
 
-def extract_text(file_path):
+def extract_text(source, filename=""):
+    """
+    Extract text from PDF or DOCX, accepting either a file path
+    or a stream/bytes with optional filename.
+    """
+    name = filename if filename else (source if isinstance(source, str) else "")
+    name_lower = name.lower()
 
-    if file_path.lower().endswith(".pdf"):
+    if name_lower.endswith(".pdf"):
+        return extract_pdf(source)
+    elif name_lower.endswith(".docx"):
+        return extract_docx(source)
 
-        return extract_pdf(file_path)
-
-    elif file_path.lower().endswith(".docx"):
-
-        return extract_docx(file_path)
+    if isinstance(source, str):
+        if source.lower().endswith(".pdf"):
+            return extract_pdf(source)
+        elif source.lower().endswith(".docx"):
+            return extract_docx(source)
 
     return ""
 

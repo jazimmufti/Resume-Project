@@ -1,69 +1,38 @@
 import os
 import pandas as pd
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from extractor import (
     extract_text,
     extract_email,
-    extract_phone
+    extract_phone,
+    extract_name
 )
 
 from llm_extractor import (
     extract_candidate_details,
+    calculate_experience,
+    calculate_relevant_experience,
     _redact
 )
 
 
 RESUME_FOLDER = "resumes"
 
-results = []
 
-
-for filename in os.listdir(RESUME_FOLDER):
-
-    if not filename.lower().endswith((".pdf", ".docx")):
-        continue
-
-    file_path = os.path.join(
-        RESUME_FOLDER,
-        filename
-    )
-
-    print(f"\nProcessing: {filename}")
+def process_file(filename):
+    file_path = os.path.join(RESUME_FOLDER, filename)
+    print(f"Processing: {filename}")
 
     try:
-
-        # --------------------------------
-        # 1. Extract resume text
-        # --------------------------------
-
         resume_text = extract_text(file_path)
 
         if not resume_text or len(resume_text.strip()) < 50:
-
-            print(
-                f"Could not extract readable text from {filename}"
-            )
-
-            continue
-
-
-        # --------------------------------
-        # 2. Python extracts email
-        # --------------------------------
+            print(f"Could not extract readable text from {filename}")
+            return None
 
         email = extract_email(resume_text)
-
-
-        # --------------------------------
-        # 3. Python extracts phone
-        # --------------------------------
-
         phone = extract_phone(resume_text)
-
-
-        # --------------------------------
-        # 4. LLaMA extracts difficult fields
-        # --------------------------------
 
         candidate = extract_candidate_details(
             resume_text,
@@ -75,27 +44,39 @@ for filename in os.listdir(RESUME_FOLDER):
             if python_name:
                 candidate["full_name"] = python_name
 
-
-        # --------------------------------
-        # 5. Combine everything
-        # --------------------------------
+        experience_periods = candidate.get("experience_periods", [])
+        candidate["total_experience"] = calculate_experience(experience_periods)
+        candidate["relevant_experience"] = calculate_relevant_experience(experience_periods)
+        candidate.pop("experience_periods", None)
 
         candidate["phone"] = phone
         candidate["email"] = email
-
         candidate["resume_file"] = filename
 
-        results.append(candidate)
-
-        print("Successfully processed:", filename)
-        print(candidate)
-
+        print(f"Successfully processed: {filename}")
+        return candidate
 
     except Exception as e:
+        print(f"Error processing {filename}: {_redact(str(e))}")
+        return None
 
-        print(
-            f"Error processing {filename}: {_redact(str(e))}"
-        )
+
+results = []
+
+valid_files = [
+    f for f in os.listdir(RESUME_FOLDER)
+    if f.lower().endswith((".pdf", ".docx"))
+]
+
+max_workers = min(len(valid_files), 3) if valid_files else 1
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    future_to_file = {
+        executor.submit(process_file, f): f for f in valid_files
+    }
+    for future in as_completed(future_to_file):
+        candidate_data = future.result()
+        if candidate_data:
+            results.append(candidate_data)
 
 
 # --------------------------------

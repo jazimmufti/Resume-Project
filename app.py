@@ -73,208 +73,81 @@ if st.button("🚀 Process Resumes"):
         status = st.empty()
 
 
-        # -----------------------------------------
-        # Process each resume
-        # -----------------------------------------
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for i, uploaded_file in enumerate(uploaded_files):
-
-            status.write(
-                f"Processing: {uploaded_file.name}"
-            )
-
-            temp_path = None
-
+        def process_resume(file_bytes, filename):
             try:
+                resume_text = extract_text(file_bytes, filename=filename)
 
-                # -----------------------------------------
-                # Save uploaded file temporarily
-                # -----------------------------------------
+                if not resume_text or len(resume_text.strip()) < 50:
+                    return None, f"Could not extract readable text from {filename}"
 
-                suffix = os.path.splitext(
-                    uploaded_file.name
-                )[1]
+                email = extract_email(resume_text)
+                phone = extract_phone(resume_text)
 
-                with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=suffix
-                ) as temp_file:
-
-                    temp_file.write(
-                        uploaded_file.getbuffer()
-                    )
-
-                    temp_path = temp_file.name
-
-
-                # -----------------------------------------
-                # Extract resume text
-                # -----------------------------------------
-
-                resume_text = extract_text(
-                    temp_path
-                )
-
-
-                # -----------------------------------------
-                # Check extracted text
-                # -----------------------------------------
-
-                if not resume_text or len(
-                    resume_text.strip()
-                ) < 50:
-
-                    st.warning(
-                        f"Could not extract readable text "
-                        f"from {uploaded_file.name}"
-                    )
-
-                    continue
-
-
-                # -----------------------------------------
-                # Extract email and phone using Python
-                # -----------------------------------------
-
-                email = extract_email(
-                    resume_text
-                )
-
-                phone = extract_phone(
-                    resume_text )
-
-
-                # -----------------------------------------
-                # Clean extracted contact information
-                # -----------------------------------------
-
-                if email:
-
-                    email = email.strip().lower()
-
-                else:
-
-                    email = None
-
-
-                if phone:
-
-                    phone = phone.strip()
-
-                else:
-
-                    phone = None
-
-
-                # -----------------------------------------
-                # Extract candidate information using LLaMA
-                # -----------------------------------------
+                email = email.strip().lower() if email else None
+                phone = phone.strip() if phone else None
 
                 candidate = extract_candidate_details(
                     resume_text,
-                    filename=uploaded_file.name
+                    filename=filename
                 )
 
-                # Fallback to python extracted name if LLM extraction returned null
                 if not candidate.get("full_name"):
                     python_name = extract_name(resume_text)
                     if python_name:
                         candidate["full_name"] = python_name
 
-
-                # -----------------------------------------
-                # Get experience periods
-                # -----------------------------------------
-
-                experience_periods = candidate.get(
-                    "experience_periods",
-                    []
-                )
-
-
-                # -----------------------------------------
-                # Calculate total experience
-                # -----------------------------------------
-
-                candidate["total_experience"] = (
-                    calculate_experience(
-                        experience_periods
-                    )
-                )
-
-
-                # -----------------------------------------
-                # Calculate relevant experience
-                # -----------------------------------------
-
-                candidate["relevant_experience"] = (
-                    calculate_relevant_experience(
-                        experience_periods
-                    )
-                )
-
-
-                # -----------------------------------------
-                # Remove intermediate LLM field
-                # -----------------------------------------
-
-                candidate.pop(
-                    "experience_periods",
-                    None
-                )
-
-
-                # -----------------------------------------
-                # Add Python extracted fields
-                # -----------------------------------------
+                experience_periods = candidate.get("experience_periods", [])
+                candidate["total_experience"] = calculate_experience(experience_periods)
+                candidate["relevant_experience"] = calculate_relevant_experience(experience_periods)
+                candidate.pop("experience_periods", None)
 
                 candidate["email"] = email
-
                 candidate["phone"] = phone
+                candidate["resume_file"] = filename
 
-                candidate["resume_file"] = (
-                    uploaded_file.name
-                )
-
-
-                # -----------------------------------------
-                # Add candidate to results
-                # -----------------------------------------
-
-                results.append(
-                    candidate
-                )
-
+                return candidate, None
 
             except Exception as e:
+                return None, f"Error processing {filename}: {_redact(str(e))}"
 
-                st.error(
-                    f"Error processing "
-                    f"{uploaded_file.name}: {_redact(str(e))}"
+        # -----------------------------------------
+        # Process resumes concurrently (up to 4 in parallel)
+        # -----------------------------------------
+        total_files = len(uploaded_files)
+        completed_count = 0
+
+        # Read buffers into memory
+        file_payloads = [
+            (f.getvalue(), f.name) for f in uploaded_files
+        ]
+
+        max_workers = min(total_files, 3)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_name = {
+                executor.submit(process_resume, b, name): name
+                for b, name in file_payloads
+            }
+
+            for future in as_completed(future_to_name):
+                file_name = future_to_name[future]
+                completed_count += 1
+
+                candidate_res, error_msg = future.result()
+
+                if error_msg:
+                    if "Could not extract" in error_msg:
+                        st.warning(error_msg)
+                    else:
+                        st.error(error_msg)
+                elif candidate_res:
+                    results.append(candidate_res)
+
+                status.write(
+                    f"Processed: {file_name} ({completed_count}/{total_files})"
                 )
-
-
-            finally:
-
-                # -----------------------------------------
-                # Delete temporary file
-                # -----------------------------------------
-
-                if temp_path and os.path.exists(
-                    temp_path
-                ):
-
-                    os.remove(temp_path)
-
-
-            # -----------------------------------------
-            # Update progress
-            # -----------------------------------------
-
-            progress_bar.progress(
-                (i + 1) / len(uploaded_files)
-            )
-
+                progress_bar.progress(completed_count / total_files)
 
         # -----------------------------------------
         # Processing completed

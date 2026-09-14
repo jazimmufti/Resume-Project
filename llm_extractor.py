@@ -55,7 +55,7 @@ def get_groq_client() -> Groq:
 # Concurrency and Rate Limiting Controls
 _llama_lock = threading.Lock()
 _last_request_time = 0.0
-_MIN_REQUEST_INTERVAL = 0.2  # Sequential pacing between requests
+_MIN_REQUEST_INTERVAL = 1.0  # Sequential pacing between LLM API requests to stay within Groq TPM limits
 
 # Exponential backoff schedule: 2s, 5s, 10s, 20s, 30s
 BACKOFF_DELAYS = [2, 5, 10, 20, 30]
