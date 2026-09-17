@@ -15,6 +15,7 @@ from llm_extractor import (
     extract_candidate_details,
     calculate_experience,
     calculate_relevant_experience,
+    calculate_no_of_companies,
     _redact
 )
 
@@ -42,6 +43,18 @@ st.write(
 
 
 # -----------------------------------------
+# Hiring role input
+# -----------------------------------------
+
+target_role = st.text_input(
+    "🎯 Hiring Role / Position",
+    value="Customer Service",
+    placeholder="e.g. Customer Service, Software Engineer, Sales Executive, Data Analyst...",
+    help="Specify the position you are hiring for. Relevant experience will be tailored specifically to this role."
+)
+
+
+# -----------------------------------------
 # File uploader
 # -----------------------------------------
 
@@ -64,7 +77,15 @@ if st.button("🚀 Process Resumes"):
             "Please upload at least one resume."
         )
 
+    elif not target_role or not target_role.strip():
+
+        st.warning(
+            "Please specify the role you are hiring for."
+        )
+
     else:
+
+        hiring_role = target_role.strip()
 
         results = []
 
@@ -90,7 +111,8 @@ if st.button("🚀 Process Resumes"):
 
                 candidate = extract_candidate_details(
                     resume_text,
-                    filename=filename
+                    filename=filename,
+                    target_role=hiring_role
                 )
 
                 if not candidate.get("full_name"):
@@ -99,9 +121,12 @@ if st.button("🚀 Process Resumes"):
                         candidate["full_name"] = python_name
 
                 experience_periods = candidate.get("experience_periods", [])
+                companies_list = candidate.get("companies", [])
                 candidate["total_experience"] = calculate_experience(experience_periods)
                 candidate["relevant_experience"] = calculate_relevant_experience(experience_periods)
+                candidate["no_of_companies"] = calculate_no_of_companies(experience_periods, companies_list)
                 candidate.pop("experience_periods", None)
+                candidate.pop("companies", None)
 
                 candidate["email"] = email
                 candidate["phone"] = phone
@@ -181,6 +206,7 @@ if st.button("🚀 Process Resumes"):
                 "highest_education",
                 "total_experience",
                 "relevant_experience",
+                "no_of_companies",
                 "resume_file"
             ]
 

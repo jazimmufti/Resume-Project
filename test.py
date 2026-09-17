@@ -11,7 +11,7 @@ from llm_extractor import (
     extract_candidate_details,
     calculate_experience,
     calculate_relevant_experience,
-
+    calculate_no_of_companies
 )
 
 # =========================================================
@@ -19,6 +19,7 @@ from llm_extractor import (
 # =========================================================
 
 file_path = "resumes/Mufti Jazim.pdf"
+target_role = "Software Engineer"
 
 
 # =========================================================
@@ -62,19 +63,14 @@ python_name = extract_name(
 # LLAMA EXTRACTION
 # =========================================================
 
+print(f"Extracting candidate details with target role: '{target_role}'...")
 candidate = extract_candidate_details(
     resume_text,
-    filename=file_path
+    filename=file_path,
+    target_role=target_role
 )
 
 
-experience_periods = candidate.get(
-    "experience_periods",
-    []
-)
-
-print("\n========== EXPERIENCE PERIODS ==========\n")
-print(experience_periods)
 # =========================================================
 # NAME FALLBACK
 # =========================================================
@@ -85,7 +81,7 @@ if not candidate.get("full_name"):
 
 
 # =========================================================
-# EXPERIENCE
+# EXPERIENCE & COMPANIES
 # =========================================================
 
 experience_periods = candidate.get(
@@ -93,8 +89,12 @@ experience_periods = candidate.get(
     []
 )
 
-print("\n========== EXPERIENCE PERIODS ==========\n")
+companies_list = candidate.get(
+    "companies",
+    []
+)
 
+print("\n========== EXPERIENCE PERIODS ==========\n")
 print(
     json.dumps(
         experience_periods,
@@ -102,23 +102,33 @@ print(
     )
 )
 
+print("\n========== COMPANIES EXTRACTED ==========\n")
+print(companies_list)
 
 total_experience = calculate_experience(
     experience_periods
 )
 
-
 relevant_experience = calculate_relevant_experience(
     experience_periods
 )
 
+no_of_companies = calculate_no_of_companies(
+    experience_periods,
+    companies_list
+)
+
 
 # =========================================================
-# REMOVE INTERMEDIATE FIELD
+# REMOVE INTERMEDIATE FIELDS
 # =========================================================
 
 candidate.pop(
     "experience_periods",
+    None
+)
+candidate.pop(
+    "companies",
     None
 )
 
@@ -127,16 +137,10 @@ candidate.pop(
 # FINAL FIELDS
 # =========================================================
 
-candidate["total_experience"] = (
-    total_experience
-)
-
-candidate["relevant_experience"] = (
-    relevant_experience
-)
-
+candidate["total_experience"] = total_experience
+candidate["relevant_experience"] = relevant_experience
+candidate["no_of_companies"] = no_of_companies
 candidate["email"] = email
-
 candidate["phone"] = phone
 
 

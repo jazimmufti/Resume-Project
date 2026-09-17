@@ -299,7 +299,11 @@ def normalize_education(education):
 # CANDIDATE EXTRACTION
 # =========================================================
 
-def extract_candidate_details(resume_text, filename="Unknown"):
+def extract_candidate_details(resume_text, filename="Unknown", target_role="Customer Service"):
+
+    if not target_role or not str(target_role).strip():
+        target_role = "Customer Service"
+    target_role = str(target_role).strip()
 
     current_year = datetime.now().year
 
@@ -314,6 +318,7 @@ FIELDS:
 - full_name
 - location
 - highest_education
+- companies
 - experience_periods
 
 
@@ -467,6 +472,8 @@ Extract ALL professional employment periods.
 
 For every job return:
 
+- company (name of the company or employer)
+- role (job title or designation)
 - start
 - end
 - duration_months
@@ -477,6 +484,15 @@ Use calendar dates when they are explicitly available.
 Use MM/YYYY whenever possible.
 
 Do NOT invent dates.
+
+
+=========================================================
+COMPANIES WORKED WITH
+=========================================================
+
+Extract an array of all unique companies/employers the candidate has worked with.
+Exclude schools, colleges, universities, and training institutes.
+If the candidate has no professional employment history, return [].
 
 
 =========================================================
@@ -505,27 +521,17 @@ Do not invent a duration when the resume does not provide one.
 
 
 =========================================================
-RELEVANT EXPERIENCE
+RELEVANT EXPERIENCE (TARGET ROLE: {target_role})
 =========================================================
 
-"relevant": true ONLY when the employment is clearly
-customer-facing.
+"relevant": true ONLY when the candidate's employment, job responsibilities, or day-to-day duties are directly relevant or closely aligned with the target role: "{target_role}".
 
-Relevant roles include work involving:
-
-- customer service
-- customer support
-- customer care
-- call center
-- client service
-- customer-facing operations
-- customer interaction
-- closely related customer-facing responsibilities
-
-Otherwise return false.
-
-Do not infer customer-facing responsibilities merely
-from a job title.
+Guidelines for relevance:
+- Evaluate the candidate's actual job duties, responsibilities, projects, and skills in that role.
+- Mark "relevant": true if their work in that role directly corresponds to or builds substantial transferable experience for the target role "{target_role}".
+- Mark "relevant": false if the role is unrelated, in a different domain, or lacks substantial responsibilities relevant to "{target_role}".
+- Do not infer relevance purely from a job title alone; inspect what the candidate actually did.
+- If in doubt or unrelated to "{target_role}", set "relevant": false.
 
 
 =========================================================
@@ -570,6 +576,8 @@ Return ONLY valid JSON in exactly this structure:
         "start_date": null,
         "end_date": null
     }},
+
+    "companies": [],
 
     "experience_periods": []
 }}
@@ -654,6 +662,7 @@ RESUME:
                         "full_name": None,
                         "location": None,
                         "highest_education": None,
+                        "companies": [],
                         "experience_periods": []
                     }
 
@@ -682,6 +691,7 @@ RESUME:
         "full_name": None,
         "location": None,
         "highest_education": None,
+        "companies": [],
         "experience_periods": []
     }
 
@@ -823,3 +833,59 @@ def calculate_relevant_experience(
     return calculate_experience(
         relevant_periods
     )
+
+
+# =========================================================
+# CALCULATE NUMBER OF COMPANIES
+# =========================================================
+
+def calculate_no_of_companies(
+    experience_periods=None,
+    companies_list=None
+):
+    """
+    Calculate the number of distinct companies the candidate has worked with.
+    Deduplicates company names using normalization and corporate suffix stripping.
+    """
+    cleaned_companies = set()
+
+    def _clean_company_name(name):
+        if not name or not isinstance(name, str):
+            return None
+        cleaned = re.sub(r"[^\w\s]", " ", name.lower()).strip()
+        cleaned = re.sub(
+            r"\b(pvt|ltd|limited|inc|corporation|corp|llc|co|llp|services|solutions|technologies|group)\b",
+            " ",
+            cleaned
+        )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned and cleaned not in {"na", "none", "null", "unknown", "n a", "not specified"}:
+            return cleaned
+        return None
+
+    if companies_list and isinstance(companies_list, list):
+        for comp in companies_list:
+            norm = _clean_company_name(comp)
+            if norm:
+                cleaned_companies.add(norm)
+
+    if experience_periods and isinstance(experience_periods, list):
+        for period in experience_periods:
+            if isinstance(period, dict):
+                comp = period.get("company")
+                norm = _clean_company_name(comp)
+                if norm:
+                    cleaned_companies.add(norm)
+
+    if cleaned_companies:
+        return len(cleaned_companies)
+
+    # Fallback: If company names were omitted in text but valid experience periods exist
+    if experience_periods and isinstance(experience_periods, list):
+        valid_periods = [
+            p for p in experience_periods
+            if isinstance(p, dict) and (p.get("duration_months") or p.get("start") or p.get("end"))
+        ]
+        return len(valid_periods)
+
+    return 0
