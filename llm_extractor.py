@@ -55,13 +55,13 @@ def get_groq_client() -> Groq:
 # Concurrency and Rate Limiting Controls
 _llama_lock = threading.Lock()
 _last_request_time = 0.0
-_MIN_REQUEST_INTERVAL = 1.0  # Sequential pacing between LLM API requests to stay within Groq TPM limits
+_MIN_REQUEST_INTERVAL = 0.2  # Fast sequential pacing between LLM API requests
 
-# Exponential backoff schedule: 2s, 5s, 10s, 20s, 30s
-BACKOFF_DELAYS = [2, 5, 10, 20, 30]
+# Exponential backoff schedule: 1s, 2s, 4s
+BACKOFF_DELAYS = [1, 2, 4]
 
 # Primary fast model and fallback model
-PRIMARY_MODEL = "groq/compound-mini"
+PRIMARY_MODEL = "qwen/qwen3.8-27b"
 FALLBACK_MODEL = "openai/gpt-oss-20b"
 
 
@@ -307,284 +307,47 @@ def extract_candidate_details(resume_text, filename="Unknown", target_role="Cust
 
     current_year = datetime.now().year
 
-    prompt = f"""
-Extract candidate information from the resume and return ONLY
-valid JSON.
-
-The current date is {datetime.now().strftime("%d/%m/%Y")}.
-
-FIELDS:
-
-- full_name
-- location
-- highest_education
-- companies
-- experience_periods
-
-
-=========================================================
-FULL NAME
-=========================================================
-
-Extract the candidate's actual name.
-
-Return null if it cannot be identified confidently.
-
-
-# =========================================================
-# LOCATION
-# =========================================================
-
-Extract the candidate's location from the resume.
-
-Special city rules:
-
-- If the candidate's own location/address explicitly mentions
-  "Indore", return "Indore".
-- If the candidate's own location/address explicitly mentions
-  "Bhopal", return "Bhopal".
-
-For ALL other cities, return only the state/UT.
-
-Examples:
-
-"Indore, Madhya Pradesh" → "Indore"
-"Indore, MP" → "Indore"
-"Patni Pura, Indore, MP" → "Indore"
-
-"Bhopal, Madhya Pradesh" → "Bhopal"
-"Bhopal, MP" → "Bhopal"
-
-"Khargone, Madhya Pradesh" → "MP"
-"Khargone, MP" → "MP"
-"Gwalior, MP" → "MP"
-"Jabalpur, Madhya Pradesh" → "MP"
-
-"Madhya Pradesh" → "MP"
-"MP" → "MP"
-
-Use these state abbreviations:
-
-Madhya Pradesh → MP
-Uttar Pradesh → UP
-Jammu and Kashmir → J&K
-Uttarakhand → UK
-
-Only use the candidate's own explicitly stated location/address.
-
-Do NOT infer location from:
-
-- college/university
-- company
-- school
-- email
-- phone number
-- PIN code
-
-Return null if no explicit candidate location is available.
-
-
-# =========================================================
-# HIGHEST EDUCATION
-# =========================================================
-
-Identify the candidate's highest educational qualification.
-
-Return it as an object with:
-
-- qualification
-- status
-- start_date
-- end_date
-
-IMPORTANT QUALIFICATION FORMAT RULES:
-
-1. Preserve a standard qualification abbreviation when it is
-   explicitly used in the resume.
-
-Examples:
-
-MA → MA
-M.A. → MA
-MBA → MBA
-M.B.A. → MBA
-MCA → MCA
-M.C.A. → MCA
-M.Com → M.Com
-M.Com. → M.Com
-M.Tech → M.Tech
-M.Tech. → M.Tech
-B.Tech → B.Tech
-B.Tech. → B.Tech
-B.Com → B.Com
-BCA → BCA
-B.Sc → B.Sc
-B.A → B.A
-M.Sc → M.Sc
-Ph.D → Ph.D
-
-2. Do NOT unnecessarily expand an abbreviation.
-
-For example:
-
-"MA" must NOT become "Master of Arts".
-
-"MBA" must NOT become "Master of Business Administration".
-
-"MCA" must NOT become "Master of Computer Applications".
-
-3. If the resume gives the full qualification name instead of
-an abbreviation, you may return the standard commonly used
-abbreviation when it is unambiguous.
-
-4. Do NOT invent or create non-standard abbreviations.
-
-5. Do NOT change the qualification level.
-
-6. If multiple qualifications exist, identify the highest-level
-qualification.
-
-7. Do not include "(pursuing)" in qualification itself.
-Python will determine the final display value.
-
-The status should describe what the resume explicitly indicates.
-
-Possible status values include:
-
-- completed
-- pursuing
-- ongoing
-- in progress
-- unknown
-
-Extract education dates when present.
-
-Do NOT invent dates.
-
-If status cannot be determined, return "unknown".
-
-
-=========================================================
-EXPERIENCE PERIODS
-=========================================================
-
-Extract ALL professional employment periods.
-
-For every job return:
-
-- company (name of the company or employer)
-- role (job title or designation)
-- start
-- end
-- duration_months
-- relevant
-
-Use calendar dates when they are explicitly available.
-
-Use MM/YYYY whenever possible.
-
-Do NOT invent dates.
-
-
-=========================================================
-COMPANIES WORKED WITH
-=========================================================
-
-Extract an array of all unique companies/employers the candidate has worked with.
-Exclude schools, colleges, universities, and training institutes.
-If the candidate has no professional employment history, return [].
-
-
-=========================================================
-DURATION-BASED EXPERIENCE
-=========================================================
-
-If a job does not provide calendar dates but explicitly
-states a duration, extract the duration as duration_months.
-
-Examples of information that may indicate duration include
-months or years of employment.
-
-Convert explicit durations into months.
-
-Examples:
-
-6 months → 6
-
-1 year → 12
-
-1 year 6 months → 18
-
-2 years 3 months → 27
-
-Do not invent a duration when the resume does not provide one.
-
-
-=========================================================
-RELEVANT EXPERIENCE (TARGET ROLE: {target_role})
-=========================================================
-
-"relevant": true ONLY when the candidate's employment, job responsibilities, or day-to-day duties are directly relevant or closely aligned with the target role: "{target_role}".
-
-Guidelines for relevance:
-- Evaluate the candidate's actual job duties, responsibilities, projects, and skills in that role.
-- Mark "relevant": true if their work in that role directly corresponds to or builds substantial transferable experience for the target role "{target_role}".
-- Mark "relevant": false if the role is unrelated, in a different domain, or lacks substantial responsibilities relevant to "{target_role}".
-- Do not infer relevance purely from a job title alone; inspect what the candidate actually did.
-- If in doubt or unrelated to "{target_role}", set "relevant": false.
-
-
-=========================================================
-EXPERIENCE RESTRICTIONS
-=========================================================
-
-Include professional employment.
-
-Do not include:
-
-- education
-- school
-- college
-- university
-- projects
-- certifications
-- hobbies
-
-Do not include internships unless explicitly described
-as professional employment.
-
-If a job has neither reliable dates nor an explicit
-duration, exclude it.
-
-Do not calculate total experience.
-
-
-=========================================================
-OUTPUT
-=========================================================
-
-Return ONLY valid JSON in exactly this structure:
-
+    prompt = f"""Extract candidate information from the resume and return ONLY valid JSON.
+The current date is {datetime.now().strftime("%d/%m/%Y")}. Target role: "{target_role}".
+
+FIELDS & RULES:
+1. full_name: Extract candidate's actual name, or null if cannot be identified confidently.
+2. location: Candidate's explicit personal residence location/address only.
+   - If candidate's own address explicitly mentions "Indore" -> return "Indore".
+   - If candidate's own address explicitly mentions "Bhopal" -> return "Bhopal".
+   - For ALL other cities, return only the state/UT abbreviation (e.g. Madhya Pradesh -> MP, Uttar Pradesh -> UP, Jammu and Kashmir -> J&K, Uttarakhand -> UK).
+   - Only use candidate's own explicitly stated location. Do NOT infer location from college/university, company, school, email, phone number, or PIN code. Return null if no explicit candidate location is available.
+3. highest_education: Return object with qualification, status, start_date, end_date.
+   - Preserve standard qualification abbreviations (e.g. B.Tech, B.Com, BCA, B.Sc, B.A, MBA, MCA, M.Tech, M.Com, M.Sc, Ph.D).
+   - Do NOT unnecessarily expand an abbreviation (e.g. "MBA" must NOT become "Master of Business Administration").
+   - If full qualification name given, return standard common abbreviation when unambiguous.
+   - Do not include "(pursuing)" in qualification itself.
+   - status: completed, pursuing, ongoing, in progress, or unknown. Extract dates when present (MM/YYYY or YYYY). Do not invent dates.
+4. companies: Array of unique companies/employers worked with. Exclude schools, colleges, universities, and training institutes. Return [] if none.
+5. experience_periods: Array of professional employment periods. For each:
+   - company: employer name
+   - role: job title or designation
+   - start: start date (MM/YYYY)
+   - end: end date (MM/YYYY or "present")
+   - duration_months: integer months if duration explicitly stated without calendar dates, else null
+   - relevant: true ONLY when candidate's employment, job responsibilities, or day-to-day duties are directly relevant or closely aligned with the target role: "{target_role}". Otherwise false.
+   - Exclude education, school, college, university, projects, certifications, hobbies. Exclude internships unless explicitly described as professional employment.
+
+OUTPUT JSON STRUCTURE:
 {{
     "full_name": null,
-
     "location": null,
-
     "highest_education": {{
         "qualification": null,
         "status": null,
         "start_date": null,
         "end_date": null
     }},
-
     "companies": [],
-
     "experience_periods": []
 }}
 
-
 RESUME:
-
 {resume_text}
 """
 
@@ -666,9 +429,28 @@ RESUME:
                         "experience_periods": []
                     }
 
+                err_lower = str(e).lower()
+                is_daily_limit = any(term in err_lower for term in ["tokens per day", "tpd", "requests per day", "rpd"])
+
+                if is_daily_limit and (model_idx < len(models_to_try) - 1):
+                    logger.warning(
+                        f"[Groq Daily Limit] File: {filename} | Model: {model_name} hit daily quota ({error_type_str}). "
+                        f"Failing over immediately to fallback model..."
+                    )
+                    break
+
                 if attempt <= max_retries:
                     base_delay = BACKOFF_DELAYS[attempt - 1]
                     delay = get_retry_delay(e, base_delay)
+
+                    # If wait delay is long and another model is available, switch immediately
+                    if delay > 4.0 and (model_idx < len(models_to_try) - 1):
+                        logger.warning(
+                            f"[Groq Immediate Failover] File: {filename} | Model: {model_name} requested {delay:.1f}s wait. "
+                            f"Failing over immediately to fallback model..."
+                        )
+                        break
+
                     logger.warning(
                         f"[LLaMA Retry] File: {filename} | Model: {model_name} | "
                         f"Attempt {attempt}/{max_retries} failed ({error_type_str}). "

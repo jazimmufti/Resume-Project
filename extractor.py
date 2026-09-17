@@ -157,10 +157,11 @@ def extract_pdf(source):
                 try:
                     pix = page.get_pixmap(
                         matrix=pymupdf.Matrix(2, 2),
+                        colorspace=pymupdf.csGRAY,
                         alpha=False
                     )
                     img = Image.frombytes(
-                        "RGB",
+                        "L",
                         [pix.width, pix.height],
                         pix.samples
                     )
